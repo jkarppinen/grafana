@@ -1343,9 +1343,11 @@ describe('PrometheusDatasource incremental query logic', () => {
 
   it('should disable incremental query when public dashboards are being used', async () => {
     config.publicDashboardAccessToken = 'token';
-    const request = createDataRequest([{ expr: 'rate(up[5m])', refId: 'A' }]);
+    const request = createDataRequest([{ expr: 'rate(up[5m])', refId: 'A' }], { panelId: 1 });
     await lastValueFrom(ds.query(request));
     expect(mockCache.requestInfo).not.toHaveBeenCalled();
+    // Clean up
+    config.publicDashboardAccessToken = undefined;
   });
 
   it('should disable incremental query when any target contains $__range', async () => {

@@ -2,7 +2,10 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -132,6 +135,14 @@ func (pd *PublicDashboardServiceImpl) GetQueryDataResponse(ctx context.Context, 
 		return nil, err
 	}
 
+	// Temp: Log received variables at Info level for debugging
+	pd.log.Info("GetQueryDataResponse: received variables", "variables", queryDto.Variables, "panelId", panelId)
+
+	// Apply template variable interpolation to dashboard if variables are provided
+	if queryDto.Variables != nil && len(queryDto.Variables) > 0 {
+		dashboard = pd.applyTemplateVariables(dashboard, queryDto.Variables)
+	}
+
 	metricReq, err := pd.GetMetricRequest(ctx, dashboard, publicDashboard, panelId, queryDto)
 	if err != nil {
 		return nil, err
@@ -155,6 +166,225 @@ func (pd *PublicDashboardServiceImpl) GetQueryDataResponse(ctx context.Context, 
 	sanitizeMetadataFromQueryData(res)
 
 	return res, nil
+}
+
+// applyTemplateVariables applies template variable interpolation to dashboard data
+func (pd *PublicDashboardServiceImpl) applyTemplateVariables(dashboard *dashboards.Dashboard, variables map[string]interface{}) *dashboards.Dashboard {
+	// Create a proper deep copy of the dashboard data to avoid modifying the original
+	dashboardJSON, err := dashboard.Data.Encode()
+	if err != nil {
+		// If encoding fails (e.g., due to circular references), return original dashboard
+		pd.log.Warn("Failed to encode dashboard JSON for variable interpolation, using original", "error", err)
+		return dashboard
+	}
+
+	copiedData, err := simplejson.NewJson(dashboardJSON)
+	if err != nil {
+		// If JSON parsing fails, return original dashboard
+		pd.log.Warn("Failed to create deep copy of dashboard JSON, using original", "error", err)
+		return dashboard
+	}
+
+	dashboardCopy := &dashboards.Dashboard{
+		ID:      dashboard.ID,
+		UID:     dashboard.UID,
+		Title:   dashboard.Title,
+		Data:    copiedData,
+		OrgID:   dashboard.OrgID,
+		Created: dashboard.Created,
+		Updated: dashboard.Updated,
+	}
+
+	// Apply targeted variable substitution to preserve dashboard structure
+	pd.interpolateVariablesInDashboard(dashboardCopy.Data, variables)
+
+	return dashboardCopy
+}
+
+// interpolateVariablesInDashboard performs targeted template variable substitution
+// It only replaces variables in safe locations (queries, titles, etc.) while preserving panel structure
+func (pd *PublicDashboardServiceImpl) interpolateVariablesInDashboard(dashboard *simplejson.Json, variables map[string]interface{}) {
+	// Interpolate in dashboard title if it exists
+	if title := dashboard.Get("title"); title.Interface() != nil {
+		dashboard.Set("title", pd.interpolateVariables(title.MustString(), variables))
+	}
+
+	// Interpolate in panels (preserving panel IDs and structure)
+	if panels := dashboard.Get("panels"); panels.Interface() != nil {
+		panelsArray := panels.MustArray()
+		for i, panelInterface := range panelsArray {
+			panel := simplejson.NewFromAny(panelInterface)
+			pd.interpolateVariablesInPanel(panel, variables)
+			panels.SetIndex(i, panel.Interface())
+		}
+	}
+
+	// For v2 schema (elements), interpolate in elements
+	if elements := dashboard.Get("elements"); elements.Interface() != nil {
+		elementsMap := elements.MustMap()
+		for elementId, elementInterface := range elementsMap {
+			element := simplejson.NewFromAny(elementInterface)
+			pd.interpolateVariablesInElementV2(element, variables)
+			elements.Set(elementId, element.Interface())
+		}
+	}
+}
+
+// interpolateVariablesInPanel interpolates variables within a single panel
+func (pd *PublicDashboardServiceImpl) interpolateVariablesInPanel(panel *simplejson.Json, variables map[string]interface{}) {
+	// Interpolate panel title (safe)
+	if title := panel.Get("title"); title.Interface() != nil {
+		panel.Set("title", pd.interpolateVariables(title.MustString(), variables))
+	}
+
+	// Interpolate panel description (safe)
+	if description := panel.Get("description"); description.Interface() != nil {
+		panel.Set("description", pd.interpolateVariables(description.MustString(), variables))
+	}
+
+	// Interpolate panel-level datasource UID if present
+	// This is important because queries may inherit datasource from panel
+	if datasource := panel.Get("datasource"); datasource.Interface() != nil {
+		pd.log.Info("interpolateVariablesInPanel: found panel datasource", "datasource", datasource.Interface())
+		if uid := datasource.Get("uid"); uid.Interface() != nil {
+			if str, ok := uid.Interface().(string); ok {
+				interpolated := pd.interpolateVariables(str, variables)
+				pd.log.Info("interpolateVariablesInPanel: interpolating datasource UID", "original", str, "interpolated", interpolated, "variables", variables)
+				datasource.Set("uid", interpolated)
+			}
+		}
+	}
+
+	// Interpolate in targets/queries (safe)
+	if targets := panel.Get("targets"); targets.Interface() != nil {
+		targetsArray := targets.MustArray()
+		for i, targetInterface := range targetsArray {
+			target := simplejson.NewFromAny(targetInterface)
+			pd.interpolateVariablesInTarget(target, variables)
+			targets.SetIndex(i, target.Interface())
+		}
+	}
+
+	// Interpolate in nested panels (for rows)
+	if panels := panel.Get("panels"); panels.Interface() != nil {
+		panelsArray := panels.MustArray()
+		for i, nestedPanelInterface := range panelsArray {
+			nestedPanel := simplejson.NewFromAny(nestedPanelInterface)
+			pd.interpolateVariablesInPanel(nestedPanel, variables)
+			panels.SetIndex(i, nestedPanel.Interface())
+		}
+	}
+}
+
+// interpolateVariablesInElementV2 interpolates variables within a v2 schema element
+func (pd *PublicDashboardServiceImpl) interpolateVariablesInElementV2(element *simplejson.Json, variables map[string]interface{}) {
+	spec := element.Get("spec")
+	if spec.Interface() == nil {
+		return
+	}
+
+	// Interpolate element-level datasource UID if present (for V2 schema)
+	// This handles cases where queries inherit datasource from the element
+	if datasource := spec.Get("datasource"); datasource.Interface() != nil {
+		if uid := datasource.Get("uid"); uid.Interface() != nil {
+			if str, ok := uid.Interface().(string); ok {
+				datasource.Set("uid", pd.interpolateVariables(str, variables))
+			}
+		}
+		// Also check for "name" field which is used in V2 schema
+		if name := datasource.Get("name"); name.Interface() != nil {
+			if str, ok := name.Interface().(string); ok {
+				datasource.Set("name", pd.interpolateVariables(str, variables))
+			}
+		}
+	}
+
+	// Interpolate in data spec queries
+	data := spec.Get("data")
+	if data.Interface() != nil {
+		dataSpec := data.Get("spec")
+		if dataSpec.Interface() != nil {
+			if queries := dataSpec.Get("queries"); queries.Interface() != nil {
+				queriesArray := queries.MustArray()
+				for i, queryInterface := range queriesArray {
+					query := simplejson.NewFromAny(queryInterface)
+					pd.interpolateVariablesInTarget(query, variables)
+					queries.SetIndex(i, query.Interface())
+				}
+			}
+		}
+	}
+}
+
+// interpolateVariablesInTarget interpolates variables within a query target
+func (pd *PublicDashboardServiceImpl) interpolateVariablesInTarget(target *simplejson.Json, variables map[string]interface{}) {
+	// Interpolate common query fields only to avoid infinite recursion
+	// Note: measurement is used by InfluxDB, metric by some other datasources
+	queryFields := []string{"expr", "query", "rawQuery", "select", "from", "where", "group", "alias", "legendFormat", "format", "interval", "step", "measurement", "metric", "table", "database"}
+
+	for _, field := range queryFields {
+		if value := target.Get(field); value.Interface() != nil {
+			if str, ok := value.Interface().(string); ok {
+				target.Set(field, pd.interpolateVariables(str, variables))
+			}
+		}
+	}
+
+	// Handle specific nested structures without recursive calls to avoid infinite loops
+	if datasource := target.Get("datasource"); datasource.Interface() != nil {
+		if uid := datasource.Get("uid"); uid.Interface() != nil {
+			if str, ok := uid.Interface().(string); ok {
+				datasource.Set("uid", pd.interpolateVariables(str, variables))
+			}
+		}
+	}
+}
+
+// interpolateVariables performs basic template variable substitution on a string
+func (pd *PublicDashboardServiceImpl) interpolateVariables(text string, variables map[string]interface{}) string {
+	result := text
+
+	// Replace variables in ${variable} format
+	for varName, varValue := range variables {
+		if varValue == nil {
+			continue
+		}
+
+		// Convert value to string
+		valueStr := pd.variableValueToString(varValue)
+
+		// Replace variable references
+		variablePattern := regexp.MustCompile(`\$\{` + regexp.QuoteMeta(varName) + `\}`)
+		result = variablePattern.ReplaceAllString(result, valueStr)
+
+		// Also handle $variable format (without braces)
+		simplePattern := regexp.MustCompile(`\$` + regexp.QuoteMeta(varName) + `\b`)
+		result = simplePattern.ReplaceAllString(result, valueStr)
+	}
+
+	return result
+}
+
+// variableValueToString converts a variable value to its string representation
+func (pd *PublicDashboardServiceImpl) variableValueToString(varValue interface{}) string {
+	switch v := varValue.(type) {
+	case string:
+		return v
+	case []interface{}:
+		// Handle multi-value variables
+		var values []string
+		for _, val := range v {
+			if str, ok := val.(string); ok {
+				values = append(values, str)
+			}
+		}
+		if len(values) > 0 {
+			return strings.Join(values, ",")
+		}
+		return ""
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 // buildMetricRequest merges public dashboard parameters with dashboard and returns a metrics request to be sent to query backend

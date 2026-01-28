@@ -7,7 +7,8 @@ var (
 
 	ErrPublicDashboardNotFound = errutil.NotFound("publicdashboards.notFound", errutil.WithPublicMessage("Dashboard not found"))
 	ErrDashboardNotFound       = errutil.NotFound("publicdashboards.dashboardNotFound", errutil.WithPublicMessage("Dashboard not found"))
-	ErrPanelNotFound           = errutil.NotFound("publicdashboards.panelNotFound", errutil.WithPublicMessage("Dashboard panel not found"))
+	ErrPanelNotFound    = errutil.NotFound("publicdashboards.panelNotFound", errutil.WithPublicMessage("Dashboard panel not found"))
+	ErrVariableNotFound = errutil.NotFound("publicdashboards.variableNotFound", errutil.WithPublicMessage("Dashboard variable not found"))
 
 	ErrBadRequest                          = errutil.BadRequest("publicdashboards.badRequest")
 	ErrPanelQueriesNotFound                = errutil.BadRequest("publicdashboards.panelQueriesNotFound", errutil.WithPublicMessage("Failed to extract queries from panel"))

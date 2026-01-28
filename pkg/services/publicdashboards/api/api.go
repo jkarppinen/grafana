@@ -72,6 +72,7 @@ func (api *Api) RegisterAPIEndpoints() {
 		apiRoute.Get("/", routing.Wrap(api.ViewPublicDashboard))
 		apiRoute.Get("/annotations", routing.Wrap(api.GetPublicAnnotations))
 		apiRoute.Post("/panels/:panelId/query", routing.Wrap(api.QueryPublicDashboard))
+		apiRoute.Post("/variables/:variableName/query", routing.Wrap(api.QueryPublicDashboardVariable))
 	}, api.Middleware.HandleApi)
 
 	// Auth endpoints

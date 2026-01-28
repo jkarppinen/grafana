@@ -4,7 +4,8 @@ import { useParams } from 'react-router-dom-v5-compat';
 
 import { GrafanaTheme2, PageLayoutType } from '@grafana/data';
 import { selectors as e2eSelectors } from '@grafana/e2e-selectors';
-import { SceneComponentProps, UrlSyncContextProvider } from '@grafana/scenes';
+import { setPublicDashboardVariables } from '@grafana/runtime';
+import { SceneComponentProps, UrlSyncContextProvider, sceneGraph } from '@grafana/scenes';
 import { Alert, Box, Icon, Stack, useStyles2 } from '@grafana/ui';
 import { Page } from 'app/core/components/Page/Page';
 import PageLoader from 'app/core/components/PageLoader/PageLoader';
@@ -22,6 +23,8 @@ import { DashboardRoutes } from 'app/types/dashboard';
 import { DashboardScene } from '../scene/DashboardScene';
 
 import { getDashboardScenePageStateManager, LoadError } from './DashboardScenePageStateManager';
+import { getPublicDashboardTemplateService } from './PublicDashboardTemplateService';
+import { PublicDashboardVariable, PublicDashboardVariableRenderer } from './PublicDashboardVariableRenderer';
 
 const selectors = e2eSelectors.pages.PublicDashboardScene;
 
@@ -70,10 +73,60 @@ export function PublicDashboardScenePage({ route }: Props) {
 
 function PublicDashboardSceneRenderer({ model }: SceneComponentProps<DashboardScene>) {
   const [isActive, setIsActive] = useState(false);
+  const [variableValues, setVariableValues] = useState<Record<string, string | string[]>>({});
   const { controls, title, body } = model.useState();
   const { timePicker, refreshPicker, hideTimeControls } = controls!.useState();
   const styles = useStyles2(getStyles);
   const conf = useGetPublicDashboardConfig();
+
+  // Extract variables from dashboard data
+  const variables = extractVariablesFromDashboard(model);
+
+  // Initialize variable values from URL parameters and scene state on mount
+  useEffect(() => {
+    const initialValues: Record<string, string | string[]> = {};
+
+    // First, read variables from URL parameters (var-xxx=value)
+    const urlParams = new URLSearchParams(window.location.search);
+    urlParams.forEach((value, key) => {
+      if (key.startsWith('var-') && value) {
+        const varName = key.substring(4); // Remove 'var-' prefix
+        initialValues[varName] = value;
+      }
+    });
+
+    // Then, fill in any missing values from scene variable state
+    for (const variable of variables) {
+      if (!initialValues[variable.name] && variable.current?.value) {
+        initialValues[variable.name] = variable.current.value;
+      }
+    }
+
+    // Always set variables if we have any (from URL or scene)
+    if (Object.keys(initialValues).length > 0) {
+      console.log('PublicDashboard: Setting variables', initialValues);
+      setVariableValues(initialValues);
+      // Sync to the query handler
+      setPublicDashboardVariables(initialValues);
+      getPublicDashboardTemplateService(initialValues);
+    }
+    // Only run on mount when variables first become available
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [variables.length]);
+
+  const handleVariableChange = (name: string, value: string | string[]) => {
+    const newValues = { ...variableValues, [name]: value };
+    setVariableValues(newValues);
+
+    // Update both the template service and the query handler
+    getPublicDashboardTemplateService(newValues);
+    setPublicDashboardVariables(newValues);
+
+    // Trigger dashboard refresh to apply new variable values
+    if (refreshPicker) {
+      refreshPicker.onRefresh();
+    }
+  };
 
   useEffect(() => {
     return refreshPicker.activate();
@@ -106,12 +159,63 @@ function PublicDashboardSceneRenderer({ model }: SceneComponentProps<DashboardSc
           </Stack>
         )}
       </div>
+      <PublicDashboardVariableRenderer
+        variables={variables}
+        onVariableChange={handleVariableChange}
+        values={variableValues}
+      />
       <div className={styles.body}>
         <body.Component model={body} />
       </div>
       <DashboardBrandingFooter />
     </Page>
   );
+}
+
+// Helper function to extract template variables from the scene's variable set
+function extractVariablesFromDashboard(model: DashboardScene): PublicDashboardVariable[] {
+  // Get variables from the scene using sceneGraph
+  const variableSet = sceneGraph.getVariables(model);
+  if (!variableSet || !variableSet.state.variables) {
+    return [];
+  }
+
+  // Map scene variables to our PublicDashboardVariable format
+  // Access properties using optional chaining since different variable types have different state properties
+  return variableSet.state.variables
+    .filter((v) => v.state.name && !v.state.name.startsWith('__'))
+    .map((v) => {
+      const state = v.state;
+      // Access optional properties that may exist on different variable types
+      const label = 'label' in state ? (state.label ?? undefined) : undefined;
+      const multi = 'multi' in state ? Boolean(state.multi) : false;
+      const options =
+        'options' in state && Array.isArray(state.options)
+          ? state.options.map((opt: { text?: unknown; value?: unknown; selected?: boolean }) => ({
+              text: String(opt.text ?? ''),
+              value: String(opt.value ?? ''),
+              selected: opt.selected,
+            }))
+          : [];
+      // Scene variables store value directly in state.value, not in a current object
+      let currentValue: string | string[] | undefined;
+      if ('value' in state && state.value !== undefined) {
+        const stateValue = state.value;
+        if (typeof stateValue === 'string' || Array.isArray(stateValue)) {
+          currentValue = stateValue;
+        }
+      }
+
+      return {
+        name: state.name,
+        label: typeof label === 'string' ? label : undefined,
+        hide: state.hide,
+        type: state.type,
+        multi,
+        options,
+        current: currentValue !== undefined ? { value: String(currentValue) } : undefined,
+      };
+    });
 }
 
 function getStyles(theme: GrafanaTheme2) {

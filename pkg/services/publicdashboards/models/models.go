@@ -155,11 +155,24 @@ type PublicDashboardQueryDTO struct {
 	MaxDataPoints   int64
 	QueryCachingTTL int64
 	TimeRange       TimeRangeDTO
+	Variables       map[string]interface{} `json:"variables,omitempty"`
 }
 
 type AnnotationsQueryDTO struct {
 	From int64
 	To   int64
+}
+
+// PublicDashboardVariableQueryDTO is the request DTO for querying variable options
+type PublicDashboardVariableQueryDTO struct {
+	Variables    map[string]interface{} `json:"variables,omitempty"`
+	SearchFilter string                 `json:"searchFilter,omitempty"`
+}
+
+// MetricFindValue represents a single option value for template variables
+type MetricFindValue struct {
+	Text  string `json:"text"`
+	Value string `json:"value"`
 }
 
 //
