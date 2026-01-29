@@ -500,6 +500,36 @@ func (_m *FakePublicDashboardService) GetQueryDataResponse(ctx context.Context, 
 	return r0, r1
 }
 
+// GetVariableQueryResponse provides a mock function with given fields: ctx, accessToken, variableName, reqDTO
+func (_m *FakePublicDashboardService) GetVariableQueryResponse(ctx context.Context, accessToken string, variableName string, reqDTO models.PublicDashboardVariableQueryDTO) ([]models.MetricFindValue, error) {
+	ret := _m.Called(ctx, accessToken, variableName, reqDTO)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetVariableQueryResponse")
+	}
+
+	var r0 []models.MetricFindValue
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, string, string, models.PublicDashboardVariableQueryDTO) ([]models.MetricFindValue, error)); ok {
+		return rf(ctx, accessToken, variableName, reqDTO)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, string, string, models.PublicDashboardVariableQueryDTO) []models.MetricFindValue); ok {
+		r0 = rf(ctx, accessToken, variableName, reqDTO)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]models.MetricFindValue)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, string, string, models.PublicDashboardVariableQueryDTO) error); ok {
+		r1 = rf(ctx, accessToken, variableName, reqDTO)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
 // NewPublicDashboardAccessToken provides a mock function with given fields: ctx
 func (_m *FakePublicDashboardService) NewPublicDashboardAccessToken(ctx context.Context) (string, error) {
 	ret := _m.Called(ctx)

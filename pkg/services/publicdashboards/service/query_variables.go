@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -235,17 +236,23 @@ func (pd *PublicDashboardServiceImpl) getQueryVariableOptions(ctx context.Contex
 		"datasource": variable.Datasource,
 	}
 
-	// Copy all fields from the original query object
+	// Copy all fields from the original query object (preserves datasource-specific fields)
 	for k, v := range queryObj {
 		queryData[k] = v
 	}
 
-	// Also set common query fields that different datasources might use
+	// Set multiple field name variants for datasource compatibility.
+	// Different datasources expect different field names:
+	// - "expr" for Prometheus/Loki
+	// - "rawSql" for SQL datasources (MySQL/MSSQL)
+	// - "query" for generic datasources
+	// Each datasource's QueryData handler unmarshals only the fields matching its struct tags,
+	// so extra fields are ignored. This defensive approach ensures variables work across all types.
 	if queryStr != "" {
 		queryData["query"] = queryStr
-		queryData["expr"] = queryStr      // Prometheus uses expr
-		queryData["rawQuery"] = true      // Some datasources need this
-		queryData["rawSql"] = queryStr    // SQL datasources
+		queryData["expr"] = queryStr
+		queryData["rawQuery"] = true
+		queryData["rawSql"] = queryStr
 	}
 
 	// Build a metric request for the variable query
@@ -341,67 +348,42 @@ func (pd *PublicDashboardServiceImpl) extractOptionsFromQueryResponse(res *backe
 	return options, nil
 }
 
-// fieldValueToString converts a data.Field value to string, handling pointers
+// convertInterfaceToString converts a variable value (string or []interface{}) to string.
+// For arrays, returns the first element; for strings, returns as-is.
+func convertInterfaceToString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+
+	switch val := v.(type) {
+	case string:
+		return val
+	case []interface{}:
+		if len(val) > 0 {
+			return fmt.Sprintf("%v", val[0])
+		}
+		return ""
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+// fieldValueToString converts a data.Field value to string, handling pointers.
 func fieldValueToString(v interface{}) string {
 	if v == nil {
 		return ""
 	}
 
-	// Handle pointer types (nullable fields return pointers)
-	switch val := v.(type) {
-	case *string:
-		if val == nil {
+	// Handle pointer types by dereferencing
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
 			return ""
 		}
-		return *val
-	case string:
-		return val
-	case *float64:
-		if val == nil {
-			return ""
-		}
-		return fmt.Sprintf("%v", *val)
-	case float64:
-		return fmt.Sprintf("%v", val)
-	case *float32:
-		if val == nil {
-			return ""
-		}
-		return fmt.Sprintf("%v", *val)
-	case float32:
-		return fmt.Sprintf("%v", val)
-	case *int64:
-		if val == nil {
-			return ""
-		}
-		return fmt.Sprintf("%d", *val)
-	case int64:
-		return fmt.Sprintf("%d", val)
-	case *int32:
-		if val == nil {
-			return ""
-		}
-		return fmt.Sprintf("%d", *val)
-	case int32:
-		return fmt.Sprintf("%d", val)
-	case *int:
-		if val == nil {
-			return ""
-		}
-		return fmt.Sprintf("%d", *val)
-	case int:
-		return fmt.Sprintf("%d", val)
-	case *bool:
-		if val == nil {
-			return ""
-		}
-		return fmt.Sprintf("%v", *val)
-	case bool:
-		return fmt.Sprintf("%v", val)
-	default:
-		// For any other type, use reflection-safe string conversion
-		return fmt.Sprintf("%v", v)
+		v = rv.Elem().Interface()
 	}
+
+	return fmt.Sprintf("%v", v)
 }
 
 // getCustomVariableOptions parses the query field as comma-separated values
@@ -439,31 +421,8 @@ func (pd *PublicDashboardServiceImpl) getCustomVariableOptions(variable *variabl
 
 // getConstantVariableOptions returns the constant value as a single option
 func (pd *PublicDashboardServiceImpl) getConstantVariableOptions(variable *variableDefinition) ([]models.MetricFindValue, error) {
-	var options []models.MetricFindValue
-
-	// Get value from current
-	value := ""
-	switch v := variable.Current.Value.(type) {
-	case string:
-		value = v
-	case []interface{}:
-		if len(v) > 0 {
-			value = fmt.Sprintf("%v", v[0])
-		}
-	}
-
-	if value != "" {
-		text := value
-		if t, ok := variable.Current.Text.(string); ok && t != "" {
-			text = t
-		}
-		options = append(options, models.MetricFindValue{
-			Text:  text,
-			Value: value,
-		})
-	}
-
-	return options, nil
+	// Constant variables have a single fixed value stored in Current
+	return pd.getCurrentValueAsOption(variable), nil
 }
 
 // getIntervalVariableOptions returns pre-defined interval options
@@ -492,26 +451,8 @@ func (pd *PublicDashboardServiceImpl) getStaticVariableOptions(variable *variabl
 	var options []models.MetricFindValue
 
 	for _, opt := range variable.Options {
-		text := ""
-		value := ""
-
-		switch t := opt.Text.(type) {
-		case string:
-			text = t
-		case []interface{}:
-			if len(t) > 0 {
-				text = fmt.Sprintf("%v", t[0])
-			}
-		}
-
-		switch v := opt.Value.(type) {
-		case string:
-			value = v
-		case []interface{}:
-			if len(v) > 0 {
-				value = fmt.Sprintf("%v", v[0])
-			}
-		}
+		text := convertInterfaceToString(opt.Text)
+		value := convertInterfaceToString(opt.Value)
 
 		if text != "" || value != "" {
 			if text == "" {
